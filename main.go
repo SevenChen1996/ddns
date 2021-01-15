@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"github.com/aliyun/alibaba-cloud-sdk-go/services/alidns"
 	"io/ioutil"
@@ -11,10 +12,13 @@ import (
 	"time"
 )
 
-const subDomain = ""
-const domain = ""
-const rr = ""
-
+var (
+	domain          = ""
+	rr              = ""
+	regionId        = ""
+	accessKeyId     = ""
+	accessKeySecret = ""
+)
 
 func genRandIpaddr() string {
 	rand.Seed(time.Now().Unix())
@@ -54,7 +58,22 @@ func isSubDomainExist(client *alidns.Client, subDomain string) (recordId string,
 	}
 
 	return response.DomainRecords.Record[0].RecordId, nil
+}
 
+func getSubDomainIp(client *alidns.Client, subDomain string) (ip string, err error) {
+	request := alidns.CreateDescribeSubDomainRecordsRequest()
+	request.Type = "A"
+	request.SubDomain = subDomain
+	response, err := client.DescribeSubDomainRecords(request)
+	if err != nil {
+		return "", err
+	}
+
+	if response.TotalCount == 0 {
+		return "", errors.New("can't find submodule")
+	}
+
+	return response.DomainRecords.Record[0].Value, nil
 }
 
 func addSubDomain(client *alidns.Client, rr, domain, ipValue string) (recordId string, err error) {
@@ -91,45 +110,67 @@ func updateSubDomain(client *alidns.Client, recordId, rr, ipValue string) error 
 
 }
 
-func main() {
-	Ip, err := getExternIp()
-	if err != nil {
-		log.Fatalln(err)
+func init() {
+	flag.StringVar(&domain, "domain", "", "the domain")
+	flag.StringVar(&rr, "rr", "", "subdomain prefix")
+	flag.StringVar(&regionId, "regionId", "cn-hangzhou", "regionId of aliyun")
+	flag.StringVar(&accessKeyId, "accessKeyId", "", "accessKeyId  of aliyun")
+	flag.StringVar(&accessKeySecret, "accessKeySecret", "", "accessKeySecret of aliyun")
+	flag.Parse()
+
+	if domain == "" || rr == "" || regionId == "" || accessKeyId == "" || accessKeySecret == "" {
+		flag.Usage()
+		log.Fatalln("invalid argument")
 	}
-	log.Println(Ip)
-	client, err := alidns.NewClientWithAccessKey()
+}
+
+func main() {
+	var ip string
+	log.Println(ip)
+	client, err := alidns.NewClientWithAccessKey(regionId, accessKeyId, accessKeySecret)
 	if err != nil {
 		log.Fatalln(err)
 	}
 
 	//查询域名是否存在
-	recordId, err := isSubDomainExist(client, subDomain)
+	recordId, err := isSubDomainExist(client, rr+"."+domain)
 	if err != nil {
 		log.Fatalln(err)
 	}
 	if recordId == "" {
-		recordId, err = addSubDomain(client, rr, domain, Ip)
+		ip, err = getExternIp()
 		if err != nil {
 			log.Fatalln(err)
 		}
+		recordId, err = addSubDomain(client, rr, domain, ip)
+		if err != nil {
+			log.Fatalln(err)
+		}
+		log.Printf("subDomain is not existed,created subDomain named %s\n", rr+"."+domain)
 	} else {
-		err = updateSubDomain(client, recordId, rr, Ip)
+		ip, err = getSubDomainIp(client, rr+"."+domain)
 		if err != nil {
 			log.Fatalln(err)
 		}
+		log.Printf("subDomain is existed")
 	}
 
 	for {
 		newIp, err := getExternIp()
 		for ; err != nil; newIp, err = getExternIp() {
+			log.Println("geting external ip falid,try once a more")
 		}
 
-		if newIp != Ip {
-			err = updateSubDomain(client, recordId, rr, Ip)
+		if newIp != ip {
+			err = updateSubDomain(client, recordId, rr, newIp)
 			if err != nil {
+				log.Println(err)
 				continue
 			}
-			Ip = newIp
+			log.Printf("update IP from %s to %s\n", ip, newIp)
+			ip = newIp
+		} else {
+			log.Printf("IP is not changed,current IP is %s\n", ip)
 		}
 
 		time.Sleep(time.Minute)
